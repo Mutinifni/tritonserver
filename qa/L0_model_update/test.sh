@@ -46,6 +46,11 @@ SERVER_LOG="./server.log"
 DATADIR=/data/inferenceserver/${REPO_VERSION}
 source ../common/util.sh
 
+# Create model
+function generate_model_repository() {
+
+}
+
 # Test unsupported INPUT data type
 rm -rf models && mkdir -p models
 cp -r $DATADIR/qa_model_repository/libtorch_int32_int8_int8 models/libtorch_invalid_input_type && \

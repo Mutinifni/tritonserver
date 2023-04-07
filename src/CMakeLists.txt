@@ -295,7 +295,6 @@ if(${TRITON_ENABLE_GRPC})
     main
     PRIVATE
       $<TARGET_PROPERTY:gRPC::grpc,INTERFACE_INCLUDE_DIRECTORIES>
-      ${OPENTELEMETRY_CPP_INCLUDE_DIRS}
   )
 
   target_compile_definitions(
@@ -388,7 +387,6 @@ if(${TRITON_ENABLE_HTTP}
     PRIVATE 
       $<TARGET_PROPERTY:libevhtp::evhtp,INTERFACE_INCLUDE_DIRECTORIES>
       ${OPENTELEMETRY_CPP_INCLUDE_DIRS}
-      #tracing-library
   )
   
 

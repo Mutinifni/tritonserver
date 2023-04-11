@@ -45,27 +45,27 @@ TRITONSERVER_Error*
 TraceManager::Create(
     TraceManager** manager, const TRITONSERVER_InferenceTraceLevel level,
     const uint32_t rate, const int32_t count, const uint32_t log_frequency,
-    const std::string& filepath)
+    const std::string& filepath, const TRITONSERVER_InferenceTraceMode mode)
 {
   // Always create TraceManager regardless of the global setting as they
   // can be updated at runtime even if tracing is not enable at start.
   // No trace should be sampled if the setting is not valid.
-  *manager = new TraceManager(level, rate, count, log_frequency, filepath);
+  *manager = new TraceManager(level, rate, count, log_frequency, filepath, mode);
   return nullptr;  // success
 }
 
 TraceManager::TraceManager(
     const TRITONSERVER_InferenceTraceLevel level, const uint32_t rate,
     const int32_t count, const uint32_t log_frequency,
-    const std::string& filepath)
+    const std::string& filepath, const TRITONSERVER_InferenceTraceMode mode)
 {
   std::shared_ptr<TraceFile> file(new TraceFile(filepath));
   global_default_.reset(new TraceSetting(
-      level, rate, count, log_frequency, file, false, false, false, false,
-      false));
+      level, rate, count, log_frequency, file, mode, false, false, false, false,
+      false, false));
   global_setting_.reset(new TraceSetting(
-      level, rate, count, log_frequency, file, false, false, false, false,
-      false));
+      level, rate, count, log_frequency, file, mode, false, false, false, false,
+      false, false));
   trace_files_.emplace(filepath, file);
 }
 
@@ -120,6 +120,7 @@ TraceManager::UpdateTraceSettingInternal(
   int32_t count = fallback_setting->count_;
   uint32_t log_frequency = fallback_setting->log_frequency_;
   std::string filepath = fallback_setting->file_->FileName();
+  TRITONSERVER_InferenceTraceMode mode = fallback_setting->mode_; 
 
   // Whether the field value is specified:
   // if clear then it is not specified, otherwise,
@@ -150,6 +151,11 @@ TraceManager::UpdateTraceSettingInternal(
                                    : (((current_setting != nullptr) &&
                                        current_setting->filepath_specified_) ||
                                       (new_setting.filepath_ != nullptr)));
+  const bool mode_specified =
+      (new_setting.clear_mode_ ? false
+                                   : (((current_setting != nullptr) &&
+                                       current_setting->mode_specified_) ||
+                                      (new_setting.mode_ != nullptr)));
   if (level_specified) {
     level = (new_setting.level_ != nullptr) ? *new_setting.level_
                                             : current_setting->level_;
@@ -171,6 +177,10 @@ TraceManager::UpdateTraceSettingInternal(
     filepath = (new_setting.filepath_ != nullptr)
                    ? *new_setting.filepath_
                    : current_setting->file_->FileName();
+  }
+  if (mode_specified) {
+    mode = (new_setting.mode_ != nullptr) ? *new_setting.mode_
+                                          : current_setting->mode_;
   }
 
   // Some special case when updating model setting
@@ -209,8 +219,9 @@ TraceManager::UpdateTraceSettingInternal(
   }
 
   std::shared_ptr<TraceSetting> lts(new TraceSetting(
-      level, rate, count, log_frequency, file, level_specified, rate_specified,
-      count_specified, log_frequency_specified, filepath_specified));
+      level, rate, count, log_frequency, file, mode, level_specified, 
+      rate_specified, count_specified, log_frequency_specified, 
+      filepath_specified, mode_specified));
   // The only invalid setting allowed is if it disables tracing
   if ((!lts->Valid()) && (level != TRITONSERVER_TRACE_LEVEL_DISABLED)) {
     return TRITONSERVER_ErrorNew(
@@ -248,7 +259,7 @@ void
 TraceManager::GetTraceSetting(
     const std::string& model_name, TRITONSERVER_InferenceTraceLevel* level,
     uint32_t* rate, int32_t* count, uint32_t* log_frequency,
-    std::string* filepath)
+    std::string* filepath, TRITONSERVER_InferenceTraceMode* mode)
 {
   std::shared_ptr<TraceSetting> trace_setting;
   {
@@ -263,6 +274,7 @@ TraceManager::GetTraceSetting(
   *count = trace_setting->count_;
   *log_frequency = trace_setting->log_frequency_;
   *filepath = trace_setting->file_->FileName();
+  *mode = trace_setting->mode_;
 }
 
 std::shared_ptr<TraceManager::Trace>
@@ -284,11 +296,14 @@ TraceManager::SampleTrace(const std::string& model_name)
 
 TraceManager::Trace::~Trace()
 {
-  trace_span_->End();
-  std::shared_ptr<opentelemetry::trace::TracerProvider> none;
-  opentelemetry::trace::Provider::SetTracerProvider(none);
-  // Write trace now
-  setting_->WriteTrace(streams_);
+  if (setting_->mode_ == TRITONSERVER_TRACE_MODE_TRITON){
+    // Write trace now
+    setting_->WriteTrace(streams_);
+  } else if (setting_->mode_ == TRITONSERVER_TRACE_MODE_OPENTELEMETRY){
+    trace_span_->End();
+    std::shared_ptr<opentelemetry::trace::TracerProvider> none;
+    opentelemetry::trace::Provider::SetTracerProvider(none);
+  }
 }
 
 void
@@ -296,24 +311,28 @@ TraceManager::Trace::CaptureTimestamp(
     const std::string& name, uint64_t timestamp_ns)
 {
   if (setting_->level_ & TRITONSERVER_TRACE_LEVEL_TIMESTAMPS) {
-    std::lock_guard<std::mutex> lk(mtx_);
-    std::stringstream* ss = nullptr;
-    {
-      if (streams_.find(trace_id_) == streams_.end()) {
-        std::unique_ptr<std::stringstream> stream(new std::stringstream());
-        ss = stream.get();
-        streams_.emplace(trace_id_, std::move(stream));
-      } else {
-        ss = streams_[trace_id_].get();
-        // If the string stream is not newly created, add "," as there is
-        // already content in the string stream
-        *ss << ",";
+    if (setting_->mode_ == TRITONSERVER_TRACE_MODE_TRITON){
+      std::lock_guard<std::mutex> lk(mtx_);
+      std::stringstream* ss = nullptr;
+      {
+        if (streams_.find(trace_id_) == streams_.end()) {
+          std::unique_ptr<std::stringstream> stream(new std::stringstream());
+          ss = stream.get();
+          streams_.emplace(trace_id_, std::move(stream));
+        } else {
+          ss = streams_[trace_id_].get();
+          // If the string stream is not newly created, add "," as there is
+          // already content in the string stream
+          *ss << ",";
+        }
       }
+      *ss << "{\"id\":" << trace_id_ << ",\"timestamps\":["
+          << "{\"name\":\"" << name << "\",\"ns\":" << timestamp_ns << "}]}";
+    } else if (setting_->mode_ == TRITONSERVER_TRACE_MODE_OPENTELEMETRY){
+
+      opentelemetry::common::SystemTimestamp otel_timestamp{(time_offset_ + std::chrono::nanoseconds{timestamp_ns})};
+      trace_span_->AddEvent(name, otel_timestamp, {{"triton.steady_timestamp_ns",timestamp_ns}});
     }
-    *ss << "{\"id\":" << trace_id_ << ",\"timestamps\":["
-        << "{\"name\":\"" << name << "\",\"ns\":" << timestamp_ns << "}]}";
-    opentelemetry::common::SystemTimestamp otel_timestamp{std::chrono::nanoseconds{timestamp_ns}};
-    this->trace_span_->AddEvent(name, otel_timestamp);
   }
 }
 
@@ -348,18 +367,21 @@ TraceManager::TraceActivity(
   auto ts =
       reinterpret_cast<std::shared_ptr<TraceManager::Trace>*>(userp)->get();
 
+ 
   std::lock_guard<std::mutex> lk(ts->mtx_);
   std::stringstream* ss = nullptr;
   {
-    if (ts->streams_.find(id) == ts->streams_.end()) {
-      std::unique_ptr<std::stringstream> stream(new std::stringstream());
-      ss = stream.get();
-      ts->streams_.emplace(id, std::move(stream));
-    } else {
-      ss = ts->streams_[id].get();
-      // If the string stream is not newly created, add "," as there is
-      // already content in the string stream
-      *ss << ",";
+    if (ts->setting_->mode_ == TRITONSERVER_TRACE_MODE_TRITON){
+      if (ts->streams_.find(id) == ts->streams_.end()) {
+        std::unique_ptr<std::stringstream> stream(new std::stringstream());
+        ss = stream.get();
+        ts->streams_.emplace(id, std::move(stream));
+      } else {
+        ss = ts->streams_[id].get();
+        // If the string stream is not newly created, add "," as there is
+        // already content in the string stream
+        *ss << ",";
+      }
     }
   }
 
@@ -384,25 +406,29 @@ TraceManager::TraceActivity(
         TRITONSERVER_InferenceTraceRequestId(trace, &request_id),
         "getting request id");
 
-    *ss << "{\"id\":" << id << ",\"model_name\":\"" << model_name
-        << "\",\"model_version\":" << model_version;
+    if (ts->setting_->mode_ == TRITONSERVER_TRACE_MODE_TRITON){
+      *ss << "{\"id\":" << id << ",\"model_name\":\"" << model_name
+          << "\",\"model_version\":" << model_version;
 
-    if (std::string(request_id) != "") {
-      *ss << ",\"request_id\":\"" << request_id << "\"";
-    }
+      if (std::string(request_id) != "") {
+        *ss << ",\"request_id\":\"" << request_id << "\"";
+      }
 
-    if (parent_id != 0) {
-      *ss << ",\"parent_id\":" << parent_id;
+      if (parent_id != 0) {
+        *ss << ",\"parent_id\":" << parent_id;
+      }
+      *ss << "},";
     }
-    *ss << "},";
   }
 
-  *ss << "{\"id\":" << id << ",\"timestamps\":["
-      << "{\"name\":\"" << TRITONSERVER_InferenceTraceActivityString(activity)
-      << "\",\"ns\":" << timestamp_ns << "}]}";
-
-  opentelemetry::common::SystemTimestamp timestamp_otel{std::chrono::nanoseconds{timestamp_ns}};
-  ts->trace_span_->AddEvent(TRITONSERVER_InferenceTraceActivityString(activity), timestamp_otel);
+  if (ts->setting_->mode_ == TRITONSERVER_TRACE_MODE_TRITON){
+    *ss << "{\"id\":" << id << ",\"timestamps\":["
+        << "{\"name\":\"" << TRITONSERVER_InferenceTraceActivityString(activity)
+        << "\",\"ns\":" << timestamp_ns << "}]}";
+  } else if (ts->setting_->mode_ == TRITONSERVER_TRACE_MODE_OPENTELEMETRY){
+    opentelemetry::common::SystemTimestamp timestamp_otel{ts->time_offset_ + std::chrono::nanoseconds{timestamp_ns}};
+    ts->trace_span_->AddEvent(TRITONSERVER_InferenceTraceActivityString(activity), timestamp_otel, {{"triton.steady_timestamp_ns",timestamp_ns}});
+  }
 }
 
 void
@@ -446,6 +472,12 @@ TraceManager::TraceTensorActivity(
   // group the activity of the same trace together for more readable output.
   auto ts =
       reinterpret_cast<std::shared_ptr<TraceManager::Trace>*>(userp)->get();
+
+  if (ts->setting_->mode_== TRITONSERVER_TRACE_MODE_OPENTELEMETRY){
+    LOG_ERROR << "Tensor level tracing is not supported by the mode: "
+              << TRITONSERVER_InferenceTraceActivityString(activity);
+    return;
+  }
 
   std::lock_guard<std::mutex> lk(ts->mtx_);
   std::stringstream* ss = nullptr;
@@ -703,19 +735,21 @@ TraceManager::TraceSetting::SampleTrace()
         TRITONSERVER_InferenceTraceId(trace, &lts->trace_id_),
         "getting trace id");
     
-    // Setting up exporter
-    otlp::OtlpHttpExporterOptions opts;
-    // [FIXME] read from cmd
-    opts.url="localhost:4318/v1/traces";
-    lts->exporter = otlp::OtlpHttpExporterFactory::Create(opts);
-    lts->processor = trace_sdk::SimpleSpanProcessorFactory::Create(std::move(lts->exporter));
-    lts->provider = trace_sdk::TracerProviderFactory::Create(std::move(lts->processor));
+    if (mode_ == TRITONSERVER_TRACE_MODE_OPENTELEMETRY){
+      // Setting up exporter
+      otlp::OtlpHttpExporterOptions opts;
+      // [FIXME] read from cmd
+      opts.url="localhost:4318/v1/traces";
+      lts->exporter_ = otlp::OtlpHttpExporterFactory::Create(opts);
+      lts->processor_ = trace_sdk::SimpleSpanProcessorFactory::Create(std::move(lts->exporter_));
+      lts->provider_ = trace_sdk::TracerProviderFactory::Create(std::move(lts->processor_));
 
-    opentelemetry::trace::StartSpanOptions options;
-    options.kind          = opentelemetry::trace::SpanKind::kServer;  // server
-    // [FIXME] think about names
-    lts->trace_span_ = lts->provider->GetTracer("triton-http-server")
-                      -> StartSpan("HandleInfer", {}, options);
+      opentelemetry::trace::StartSpanOptions options;
+      options.kind = opentelemetry::trace::SpanKind::kServer;  // server
+      // [FIXME] think about names
+      lts->trace_span_ = lts->provider_->GetTracer("triton-http-server")
+                        -> StartSpan("HandleInfer", {}, options);
+    }
     return lts;
   }
   return nullptr;
@@ -761,15 +795,17 @@ TraceManager::TraceSetting::WriteTrace(
 TraceManager::TraceSetting::TraceSetting(
     const TRITONSERVER_InferenceTraceLevel level, const uint32_t rate,
     const int32_t count, const uint32_t log_frequency,
-    const std::shared_ptr<TraceFile>& file, const bool level_specified,
-    const bool rate_specified, const bool count_specified,
-    const bool log_frequency_specified, const bool filepath_specified)
+    const std::shared_ptr<TraceFile>& file, 
+    const TRITONSERVER_InferenceTraceMode mode,
+    const bool level_specified, const bool rate_specified, 
+    const bool count_specified, const bool log_frequency_specified, 
+    const bool filepath_specified, const bool mode_specified)
     : level_(level), rate_(rate), count_(count), log_frequency_(log_frequency),
-      file_(file), level_specified_(level_specified),
+      file_(file), mode_(mode), level_specified_(level_specified),
       rate_specified_(rate_specified), count_specified_(count_specified),
       log_frequency_specified_(log_frequency_specified),
-      filepath_specified_(filepath_specified), sample_(0), created_(0),
-      collected_(0), sample_in_stream_(0)
+      filepath_specified_(filepath_specified), mode_specified_(mode_specified), 
+      sample_(0), created_(0), collected_(0), sample_in_stream_(0)
 {
   if (level_ == TRITONSERVER_TRACE_LEVEL_DISABLED) {
     invalid_reason_ = "tracing is disabled";

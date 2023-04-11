@@ -48,8 +48,6 @@ namespace trace_sdk = opentelemetry::sdk::trace;
 
 #include "triton/core/tritonserver.h"
 
-namespace otel_trace = opentelemetry::trace;
-
 namespace triton { namespace server {
 
 //
@@ -69,7 +67,8 @@ class TraceManager {
         : clear_level_(false), level_(nullptr), clear_rate_(false),
           rate_(nullptr), clear_count_(false), count_(nullptr),
           clear_log_frequency_(false), log_frequency_(nullptr),
-          clear_filepath_(false), filepath_(nullptr)
+          clear_filepath_(false), filepath_(nullptr), 
+          clear_mode_(false), mode_(nullptr)
     {
     }
     bool clear_level_;
@@ -86,6 +85,9 @@ class TraceManager {
 
     bool clear_filepath_;
     const std::string* filepath_;
+
+    bool clear_mode_;
+    const TRITONSERVER_InferenceTraceMode* mode_;
   };
 
   struct Trace;
@@ -94,7 +96,7 @@ class TraceManager {
   static TRITONSERVER_Error* Create(
       TraceManager** manager, const TRITONSERVER_InferenceTraceLevel level,
       const uint32_t rate, const int32_t count, const uint32_t log_frequency,
-      const std::string& filepath);
+      const std::string& filepath, const TRITONSERVER_InferenceTraceMode mode);
 
   ~TraceManager() = default;
 
@@ -110,7 +112,7 @@ class TraceManager {
   void GetTraceSetting(
       const std::string& model_name, TRITONSERVER_InferenceTraceLevel* level,
       uint32_t* rate, int32_t* count, uint32_t* log_frequency,
-      std::string* filepath);
+      std::string* filepath, TRITONSERVER_InferenceTraceMode* mode);
 
   // Return the current timestamp.
   static uint64_t CaptureTimestamp()
@@ -139,13 +141,17 @@ class TraceManager {
 
     uint64_t trace_id_;
 
+    const std::chrono::time_point<std::chrono::system_clock> time_offset_ = 
+        std::chrono::system_clock::now() -  std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch());
+
     opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> trace_span_;
     
-    std::unique_ptr<opentelemetry::sdk::trace::SpanExporter> exporter;
+    std::unique_ptr<opentelemetry::sdk::trace::SpanExporter> exporter_;
 
-    std::unique_ptr<trace_sdk::SpanProcessor> processor;
+    std::unique_ptr<trace_sdk::SpanProcessor> processor_;
 
-    std::shared_ptr<opentelemetry::trace::TracerProvider> provider;
+    std::shared_ptr<opentelemetry::trace::TracerProvider> provider_;
 
     // Capture a timestamp generated outside of triton and associate it
     // with this trace.
@@ -156,7 +162,7 @@ class TraceManager {
   TraceManager(
       const TRITONSERVER_InferenceTraceLevel level, const uint32_t rate,
       const int32_t count, const uint32_t log_frequency,
-      const std::string& filepath);
+      const std::string& filepath, const TRITONSERVER_InferenceTraceMode mode);
 
   static void TraceActivity(
       TRITONSERVER_InferenceTrace* trace,
@@ -208,19 +214,22 @@ class TraceManager {
    public:
     TraceSetting()
         : level_(TRITONSERVER_TRACE_LEVEL_DISABLED), rate_(0), count_(-1),
-          log_frequency_(0), level_specified_(false), rate_specified_(false),
+          log_frequency_(0), mode_(TRITONSERVER_TRACE_MODE_TRITON),
+          level_specified_(false), rate_specified_(false),
           count_specified_(false), log_frequency_specified_(false),
-          filepath_specified_(false), sample_(0), created_(0), collected_(0),
-          sample_in_stream_(0)
+          filepath_specified_(false), mode_specified_(false), sample_(0), 
+          created_(0), collected_(0), sample_in_stream_(0)
     {
       invalid_reason_ = "Setting hasn't been initialized";
     }
     TraceSetting(
         const TRITONSERVER_InferenceTraceLevel level, const uint32_t rate,
         const int32_t count, const uint32_t log_frequency,
-        const std::shared_ptr<TraceFile>& file, const bool level_specified,
-        const bool rate_specified, const bool count_specified,
-        const bool log_frequency_specified, const bool filepath_specified);
+        const std::shared_ptr<TraceFile>& file, 
+        const TRITONSERVER_InferenceTraceMode mode, 
+        const bool level_specified, const bool rate_specified, 
+        const bool count_specified, const bool log_frequency_specified, 
+        const bool filepath_specified, const bool mode_specified);
 
     ~TraceSetting();
 
@@ -238,6 +247,7 @@ class TraceManager {
     int32_t count_;
     const uint32_t log_frequency_;
     const std::shared_ptr<TraceFile> file_;
+    const TRITONSERVER_InferenceTraceMode mode_;
 
     // Whether the field value is specified or mirror from upper level setting
     const bool level_specified_;
@@ -245,6 +255,7 @@ class TraceManager {
     const bool count_specified_;
     const bool log_frequency_specified_;
     const bool filepath_specified_;
+    const bool mode_specified_;
 
    private:
     std::string invalid_reason_;

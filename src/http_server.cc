@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <list>
 #include <thread>
+#include <chrono>
 
 #include "classification.h"
 
@@ -1398,10 +1399,15 @@ HTTPAPIServer::HandleRepositoryControl(
           }
         }
       }
+      auto start = std::chrono::high_resolution_clock::now();
       HTTP_RESPOND_IF_ERR(
           req, TRITONSERVER_ServerLoadModelWithParameters(
                    server_.get(), model_name.c_str(), const_params.data(),
                    const_params.size()));
+      auto end = std::chrono::high_resolution_clock::now();
+      LOG_INFO << "model started up in " <<
+      std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count()
+      << " ms\n";
     } else if (action == "unload") {
       // Check if the dependent models should be removed
       bool unload_dependents = false;
